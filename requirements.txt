@@ -4,3 +4,5 @@ psycopg2-binary
 python-dotenv
 numpy
 scipy
+pytest
+pytest-mock

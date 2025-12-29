@@ -1,16 +1,25 @@
 import os
 import json
+import logging
 import pandas as pd
 import numpy as np
 import psycopg2
+from psycopg2 import pool
+from contextlib import contextmanager
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 import vwcd
 
-# Load environment variables
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("Data-Analyzer-MCP")
+
+# --- Environment & Configuration ---
 load_dotenv()
 
-# Configuration
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
@@ -22,78 +31,134 @@ MCP_PORT = int(os.getenv("MCP_PORT", 8000))
 # Initialize FastMCP
 mcp = FastMCP(name="Data-Analyzer-MCP", host=MCP_HOST, port=MCP_PORT)
 
+# --- Global State ---
+_db_pool = None
+_cached_docs = {}
+
+# --- Initialization ---
+def init_resources():
+    """Initialize database pool and cache documentation."""
+    global _db_pool, _cached_docs
+    
+    # Init DB Pool
+    try:
+        if not _db_pool:
+            _db_pool = psycopg2.pool.SimpleConnectionPool(
+                minconn=1,
+                maxconn=20,
+                host=DB_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD
+            )
+            logger.info("Database connection pool initialized.")
+    except Exception as e:
+        logger.error(f"Failed to initialize database pool: {e}")
+
+    # Load Documentation
+    try:
+        if not _cached_docs:
+            if os.path.exists("documentation.json"):
+                with open("documentation.json", "r") as f:
+                    _cached_docs = json.load(f)
+                logger.info("Documentation loaded into cache.")
+            else:
+                logger.warning("documentation.json not found.")
+    except Exception as e:
+        logger.error(f"Failed to load documentation: {e}")
+
+# Call init immediately to fail fast if config is bad, 
+# or we can rely on lazy loading in tools. 
+# For an MCP server, lazy loading + module level init is a common pattern.
+init_resources()
+
 # --- Database Helper ---
+@contextmanager
 def get_db_connection():
-    """Establish a connection to the PostgreSQL database."""
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
+    """Yields a connection from the pool and ensures it's returned."""
+    if _db_pool is None:
+        init_resources()
+        if _db_pool is None:
+            raise Exception("Database pool is not initialized.")
+    
+    conn = _db_pool.getconn()
+    try:
+        yield conn
+    finally:
+        _db_pool.putconn(conn)
 
 # --- Tools ---
 
 @mcp.tool()
 def list_tables() -> str:
     """List all available tables in the public schema of the database."""
+    logger.info("Tool called: list_tables")
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-        """)
-        tables = [row[0] for row in cur.fetchall()]
-        cur.close()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                """)
+                tables = [row[0] for row in cur.fetchall()]
         return json.dumps({"tables": tables})
     except Exception as e:
+        logger.error(f"Error in list_tables: {e}")
         return f"Error listing tables: {str(e)}"
 
 @mcp.tool()
 def describe_table(table_name: str) -> str:
     """Get the column names, types, and a few sample rows for a specific table."""
+    logger.info(f"Tool called: describe_table (table={table_name})")
     try:
-        conn = get_db_connection()
-        # Get column info
-        query_cols = f"""
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_name = %s
-        """
-        df_cols = pd.read_sql(query_cols, conn, params=(table_name,))
-        
-        # Get sample rows
-        query_sample = f"SELECT * FROM {table_name} LIMIT 3"
-        df_sample = pd.read_sql(query_sample, conn)
-        
-        conn.close()
+        with get_db_connection() as conn:
+            # Get column info
+            query_cols = """
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = %s
+            """
+            df_cols = pd.read_sql(query_cols, conn, params=(table_name,))
+            
+            # Get sample rows
+            # Validate table_name to prevent injection (simple alphanumeric check recommended)
+            if not table_name.replace("_","").isalnum():
+                 return "Error: Invalid table name."
+
+            query_sample = f"SELECT * FROM {table_name} LIMIT 3"
+            df_sample = pd.read_sql(query_sample, conn)
         
         return json.dumps({
             "columns": df_cols.to_dict(orient="records"),
             "sample_data": df_sample.to_dict(orient="records")
         }, default=str)
     except Exception as e:
+        logger.error(f"Error in describe_table: {e}")
         return f"Error describing table {table_name}: {str(e)}"
 
 @mcp.tool()
 def query_data(sql_query: str) -> str:
     """
     Execute a read-only SQL query on the database.
-    Use this to fetch specific datasets for analysis.
+    Supports SELECT, WITH, and EXPLAIN.
     """
-    if not sql_query.strip().lower().startswith("select"):
-        return "Error: Only SELECT queries are allowed."
+    logger.info(f"Tool called: query_data")
+    
+    cleaned_query = sql_query.strip().lower()
+    valid_starts = ("select", "with", "explain")
+    
+    if not any(cleaned_query.startswith(prefix) for prefix in valid_starts):
+        logger.warning(f"Blocked invalid query: {sql_query[:50]}...")
+        return "Error: Only SELECT, WITH, and EXPLAIN queries are allowed."
     
     try:
-        conn = get_db_connection()
-        df = pd.read_sql(sql_query, conn)
-        conn.close()
+        with get_db_connection() as conn:
+            df = pd.read_sql(sql_query, conn)
         return df.to_json(orient="records", date_format="iso")
     except Exception as e:
+        logger.error(f"Error in query_data: {e}")
         return f"Error executing query: {str(e)}"
 
 @mcp.tool()
@@ -102,10 +167,10 @@ def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = No
     Fetch data via SQL and perform statistical analysis on a specific metric.
     Returns mean, median, std dev, and percentiles (p5, p95).
     """
+    logger.info(f"Tool called: analyze_metrics (metric={metric_column})")
     try:
-        conn = get_db_connection()
-        df = pd.read_sql(sql_query, conn)
-        conn.close()
+        with get_db_connection() as conn:
+            df = pd.read_sql(sql_query, conn)
         
         if df.empty:
             return "No data found."
@@ -128,6 +193,7 @@ def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = No
             
         return json.dumps(stats.to_dict() if isinstance(stats, pd.DataFrame) else stats)
     except Exception as e:
+        logger.error(f"Error in analyze_metrics: {e}")
         return f"Error analyzing metrics: {str(e)}"
 
 @mcp.tool()
@@ -136,6 +202,7 @@ def detect_change_points(data: list[float]) -> str:
     Detect change points in a time series using the VWCD algorithm.
     Returns a list of segments with their start/end indices and statistical description (mean, std).
     """
+    logger.info(f"Tool called: detect_change_points (data_points={len(data) if data else 0})")
     try:
         if not data:
             return "Error: Empty data provided."
@@ -156,20 +223,27 @@ def detect_change_points(data: list[float]) -> str:
         })
 
     except Exception as e:
+        logger.error(f"Error in detect_change_points: {e}")
         return f"Error detecting change points: {str(e)}"
 
 @mcp.tool()
 def get_mlab_documentation(topic: str = None) -> str:
     """
     Get documentation about M-Lab tools (NDT, Traceroute).
+    Uses cached documentation.
     """
+    logger.info(f"Tool called: get_mlab_documentation (topic={topic})")
     try:
-        with open("documentation.json", "r") as f:
-            doc = json.load(f)
-        if topic and topic.lower() in doc:
-            return json.dumps(doc[topic.lower()])
+        # Use cached docs
+        doc = _cached_docs
+        if not doc:
+            return "Error: Documentation not loaded."
+            
+        if topic:
+            return json.dumps(doc.get(topic.lower()))
         return json.dumps(doc)
     except Exception as e:
+        logger.error(f"Error reading documentation: {e}")
         return f"Error reading documentation: {str(e)}"
 
 # --- Prompts ---
@@ -215,4 +289,5 @@ def check_device_status(raspberry_id: str):
 
 if __name__ == "__main__":
     # Run via SSE
+    logger.info("Starting Data Analyzer MCP Server...")
     mcp.run(transport="sse")
