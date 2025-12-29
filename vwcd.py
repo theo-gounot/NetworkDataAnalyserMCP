@@ -175,3 +175,32 @@ def vwcd(X, w=20, w0=20, ab=1, p_thr=0.8, vote_p_thr=0.9, vote_n_thr=0.5, y0=0.5
     # requirement, but let's stick to the ported logic and maybe augment it in the wrapper.
 
     return CP, M0, S0, elapsedTime
+
+def get_segments(X, CP):
+    """
+    Split the time-series into segments based on change-points and compute stats.
+    """
+    segments = []
+    change_points = [-1] + CP + [len(X)-1]
+    
+    for i in range(len(change_points) - 1):
+        s = int(change_points[i] + 1)
+        e = int(change_points[i+1])
+        if s > e: continue 
+        
+        segment_data = X[s:e+1]
+        mean_val = float(np.mean(segment_data))
+        std_val = float(np.std(segment_data, ddof=1)) if len(segment_data) > 1 else 0.0
+        
+        segments.append({
+            "segment_index": i,
+            "start_index": s,
+            "end_index": e,
+            "length": len(segment_data),
+            "mean": mean_val,
+            "std": std_val,
+            "min": float(np.min(segment_data)),
+            "max": float(np.max(segment_data)),
+            "median": float(np.median(segment_data))
+        })
+    return segments

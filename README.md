@@ -44,21 +44,8 @@ MCP_PORT=8000
 
 ## Usage
 
-Start the server using `uvicorn` (or run the script directly if configured):
+Run the script directly if configured:
 
 ```bash
 python server.py
 ```
-
-Or explicitly with uvicorn:
-
-```bash
-uvicorn server:app --host 0.0.0.0 --port 8000
-```
-
-## Available Prompts
-
-See `prompts.txt` for a list of queries you can ask the agent.
-
-- **Investigate Latency**: "Investigate why latency is high for [device]"
-- **Stability Report**: "Generate a network stability report for the last 7 days"

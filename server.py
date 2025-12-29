@@ -144,29 +144,10 @@ def detect_change_points(data: list[float]) -> str:
         X = np.array(data)
         
         # Run VWCD
-        CP, M0, S0, elapsed = vwcd.vwcd(X)
+        CP, _, _, elapsed = vwcd.vwcd(X)
         
-        # Format results by calculating stats for each segment defined by CP
-        segments = []
-        change_points = [-1] + CP + [len(X)-1]
-        
-        for i in range(len(change_points) - 1):
-            s = change_points[i] + 1
-            e = change_points[i+1]
-            if s > e: continue 
-            
-            segment_data = X[s:e+1]
-            mean_val = float(np.mean(segment_data))
-            std_val = float(np.std(segment_data, ddof=1)) if len(segment_data) > 1 else 0.0
-            
-            segments.append({
-                "segment_index": i,
-                "start_index": int(s),
-                "end_index": int(e),
-                "length": int(len(segment_data)),
-                "mean": mean_val,
-                "std": std_val
-            })
+        # Get segments with statistical description
+        segments = vwcd.get_segments(X, CP)
             
         return json.dumps({
             "change_points": [int(cp) for cp in CP],
