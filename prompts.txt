@@ -1,0 +1,10 @@
+# Simple Prompts
+- "What does the 'rtt' metric mean?"
+- "Is the Raspberry Pi 'pi-lab-01' online?"
+- "List all tables in the database."
+- "Show me the columns in the 'ndt_data' table."
+
+# Complex Prompts
+- "Investigate why the network latency is high for raspberry pi 'pi-lab-01'."
+- "Generate a network stability report for the last 7 days."
+- "Compare the download speeds of 'pi-lab-01' and 'pi-lab-02' over the last 24 hours."

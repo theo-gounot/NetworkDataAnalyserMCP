@@ -1,0 +1,26 @@
+{
+  "ndt": {
+    "description": "The Network Diagnostic Tool (NDT) provides a sophisticated measurement of a connection's capacity for 'bulk transport'. It evaluates how well a connection performs when trying to move large amounts of data.",
+    "key_metrics": {
+      "Download Speed": "The rate at which data is transferred from the server to the client. Measured in bps/Mbps.",
+      "Upload Speed": "The rate at which data is transferred from the client to the server.",
+      "RTT (Round-Trip Time)": "The time it takes for a packet to travel from the source to the destination and back. High RTT indicates latency issues.",
+      "TCP Congestion Control": "NDT reveals how different algorithms (Cubic, BBR, Reno) handle network bottlenecks. This is crucial for understanding why speeds might be capped even if bandwidth is high.",
+      "Bulk Transport Capacity": "An estimate of the throughput the connection can sustain over a longer period."
+    }
+  },
+  "traceroute": {
+    "description": "Traceroute maps the path packets take through the internet. M-Lab uses 'scamper' to perform these tests from the server back to the client.",
+    "key_metrics": {
+      "Hops": "The sequence of routers (intermediaries) between the server and the client.",
+      "Hop RTT": "The round-trip time to each specific intermediary router. Significant jumps between two hops indicate where the congestion or delay is occurring.",
+      "Path Information": "Identifies the specific IP addresses and network providers (ASNs) through which data travels.",
+      "Packet Loss at Hop": "Identifies if specific routers are dropping packets, which can indicate hardware failure or severe congestion at a specific exchange point."
+    }
+  },
+  "general_troubleshooting": {
+    "high_latency": "Look for high RTT in NDT and identify the specific hop where RTT jumps in Traceroute.",
+    "low_throughput": "Check if TCP Congestion Control is limiting the window size, or if packet loss is causing frequent retransmissions.",
+    "intermittent_connection": "Compare multiple NDT tests over time to see if performance drops correlate with specific times of day or specific network paths."
+  }
+}
