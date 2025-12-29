@@ -1,9 +1,11 @@
 import os
 import json
 import pandas as pd
+import numpy as np
 import psycopg2
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+import vwcd
 
 # Load environment variables
 load_dotenv()
@@ -18,7 +20,7 @@ MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", 8000))
 
 # Initialize FastMCP
-mcp = FastMCP("Data-Analyzer-MCP")
+mcp = FastMCP(name="Data-Analyzer-MCP", host=MCP_HOST, port=MCP_PORT)
 
 # --- Database Helper ---
 def get_db_connection():
@@ -129,6 +131,53 @@ def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = No
         return f"Error analyzing metrics: {str(e)}"
 
 @mcp.tool()
+def detect_change_points(data: list[float]) -> str:
+    """
+    Detect change points in a time series using the VWCD algorithm.
+    Returns a list of segments with their start/end indices and statistical description (mean, std).
+    """
+    try:
+        if not data:
+            return "Error: Empty data provided."
+        
+        # Convert to numpy array
+        X = np.array(data)
+        
+        # Run VWCD
+        CP, M0, S0, elapsed = vwcd.vwcd(X)
+        
+        # Format results by calculating stats for each segment defined by CP
+        segments = []
+        change_points = [-1] + CP + [len(X)-1]
+        
+        for i in range(len(change_points) - 1):
+            s = change_points[i] + 1
+            e = change_points[i+1]
+            if s > e: continue 
+            
+            segment_data = X[s:e+1]
+            mean_val = float(np.mean(segment_data))
+            std_val = float(np.std(segment_data, ddof=1)) if len(segment_data) > 1 else 0.0
+            
+            segments.append({
+                "segment_index": i,
+                "start_index": int(s),
+                "end_index": int(e),
+                "length": int(len(segment_data)),
+                "mean": mean_val,
+                "std": std_val
+            })
+            
+        return json.dumps({
+            "change_points": [int(cp) for cp in CP],
+            "segments": segments,
+            "elapsed_time_ms": elapsed * 1000
+        })
+
+    except Exception as e:
+        return f"Error detecting change points: {str(e)}"
+
+@mcp.tool()
 def get_mlab_documentation(topic: str = None) -> str:
     """
     Get documentation about M-Lab tools (NDT, Traceroute).
@@ -185,4 +234,4 @@ def check_device_status(raspberry_id: str):
 
 if __name__ == "__main__":
     # Run via SSE
-    mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)
+    mcp.run(transport="sse")
