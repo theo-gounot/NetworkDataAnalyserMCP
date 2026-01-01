@@ -92,7 +92,7 @@ def get_db_connection():
 
 @mcp.tool()
 def list_tables() -> str:
-    """List all available tables in the public schema of the database."""
+    """Start here. Discover the available database tables (public schema) to understand what network telemetry data is accessible."""
     logger.info("Tool called: list_tables")
     try:
         with get_db_connection() as conn:
@@ -110,7 +110,7 @@ def list_tables() -> str:
 
 @mcp.tool()
 def describe_table(table_name: str) -> str:
-    """Get the column names, types, and a few sample rows for a specific table."""
+    """Inspect the schema of a specific table. Returns column names and sample rows. **ALWAYS** run this before writing a custom SQL query to ensure your column names are correct."""
     logger.info(f"Tool called: describe_table (table={table_name})")
     try:
         with get_db_connection() as conn:
@@ -141,8 +141,7 @@ def describe_table(table_name: str) -> str:
 @mcp.tool()
 def query_data(sql_query: str) -> str:
     """
-    Execute a read-only SQL query on the database.
-    Supports SELECT, WITH, and EXPLAIN.
+    Execute custom read-only SQL (SELECT/WITH) for complex aggregations or filtering not covered by other tools. **Warning:** Ensure you know the table schema first.
     """
     logger.info(f"Tool called: query_data")
     
@@ -199,8 +198,7 @@ def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = No
 @mcp.tool()
 def detect_change_points(data: list[float]) -> str:
     """
-    Detect change points in a time series using the VWCD algorithm.
-    Returns a list of segments with their start/end indices and statistical description (mean, std).
+    Identify structural changes in connection quality. Accepts an array of time-series data (e.g., download speeds) and finds the exact indices where performance shifted significantly.
     """
     logger.info(f"Tool called: detect_change_points (data_points={len(data) if data else 0})")
     try:
@@ -225,6 +223,55 @@ def detect_change_points(data: list[float]) -> str:
     except Exception as e:
         logger.error(f"Error in detect_change_points: {e}")
         return f"Error detecting change points: {str(e)}"
+
+@mcp.tool()
+def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> str:
+    """
+    Execute a SQL query and detect change points on a specific metric column using the VWCD algorithm.
+    This avoids fetching large datasets to the client.
+    """
+    logger.info(f"Tool called: analyze_change_points_from_sql (metric={metric_column})")
+    
+    # Basic query validation
+    cleaned_query = sql_query.strip().lower()
+    valid_starts = ("select", "with", "explain")
+    if not any(cleaned_query.startswith(prefix) for prefix in valid_starts):
+        return "Error: Only SELECT, WITH, and EXPLAIN queries are allowed."
+
+    try:
+        with get_db_connection() as conn:
+            df = pd.read_sql(sql_query, conn)
+        
+        if df.empty:
+            return "No data found."
+        
+        if metric_column not in df.columns:
+            return f"Metric column '{metric_column}' not found. Available columns: {list(df.columns)}"
+        
+        # Ensure metric is numeric and drop NaNs
+        data = pd.to_numeric(df[metric_column], errors='coerce').dropna().tolist()
+        
+        if not data:
+            return "Error: No valid numeric data found in the specified column."
+
+        # Convert to numpy array for VWCD
+        X = np.array(data)
+        
+        # Run VWCD
+        CP, _, _, elapsed = vwcd.vwcd(X)
+        
+        # Get segments with statistical description
+        segments = vwcd.get_segments(X, CP)
+            
+        return json.dumps({
+            "change_points": [int(cp) for cp in CP],
+            "segments": segments,
+            "elapsed_time_ms": elapsed * 1000
+        })
+
+    except Exception as e:
+        logger.error(f"Error in analyze_change_points_from_sql: {e}")
+        return f"Error analyzing change points from SQL: {str(e)}"
 
 @mcp.tool()
 def get_mlab_documentation(topic: str = None) -> str:

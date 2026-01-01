@@ -100,3 +100,36 @@ def test_analyze_metrics(mock_db_pool):
         
         assert stats['count'] == 6
         assert stats['mean'] > 0
+
+@patch('server.vwcd')
+@patch('pandas.read_sql')
+def test_analyze_change_points_from_sql(mock_read_sql, mock_vwcd, mock_db_pool):
+    mock_pool, mock_conn, _ = mock_db_pool
+    
+    # Setup mock data
+    df = pd.DataFrame({'metric': [10, 10, 10, 20, 20, 20]})
+    mock_read_sql.return_value = df
+    
+    # Setup vwcd mock
+    mock_vwcd.vwcd.return_value = ([3], None, None, 0.1)
+    mock_vwcd.get_segments.return_value = [{"start": 0, "end": 3, "mean": 10}, {"start": 3, "end": 6, "mean": 20}]
+    
+    # Test valid execution
+    result = server.analyze_change_points_from_sql("SELECT * FROM t", "metric")
+    data = json.loads(result)
+    
+    assert len(data["change_points"]) == 1
+    assert data["change_points"][0] == 3
+    assert len(data["segments"]) == 2
+    mock_read_sql.assert_called_once()
+    mock_vwcd.vwcd.assert_called_once()
+    
+    # Test invalid query
+    assert "Error: Only SELECT" in server.analyze_change_points_from_sql("DELETE FROM t", "metric")
+    
+    # Test missing column
+    assert "Metric column" in server.analyze_change_points_from_sql("SELECT * FROM t", "wrong_col")
+    
+    # Test empty data
+    mock_read_sql.return_value = pd.DataFrame()
+    assert "No data found" in server.analyze_change_points_from_sql("SELECT * FROM t", "metric")
