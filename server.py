@@ -94,7 +94,7 @@ async def fetch_as_dataframe(query: str, *args) -> pd.DataFrame:
 
 # --- Tools ---
 
-@mcp.tool()
+@mcp.tool(description="List all available tables in the public schema of the database.")
 async def list_tables() -> str:
     """Start here. Discover the available database tables (public schema) to understand what network telemetry data is accessible."""
     logger.info("Tool called: list_tables")
@@ -112,7 +112,7 @@ async def list_tables() -> str:
         logger.error(f"Error in list_tables: {e}")
         return f"Error listing tables: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(description="Get the column names, types, and a few sample rows for a specific table.")
 async def describe_table(table_name: str) -> str:
     """Inspect the schema of a specific table. Returns column names and sample rows. **ALWAYS** run this before writing a custom SQL query to ensure your column names are correct."""
     logger.info(f"Tool called: describe_table (table={table_name})")
@@ -143,7 +143,7 @@ async def describe_table(table_name: str) -> str:
         logger.error(f"Error in describe_table: {e}")
         return f"Error describing table {table_name}: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(description="Execute a read-only SQL query (SELECT/WITH) to retrieve data. Use this for custom filtering and joins.")
 async def query_data(sql_query: str) -> str:
     """
     Execute custom read-only SQL (SELECT/WITH) for complex aggregations or filtering not covered by other tools. **Warning:** Ensure you know the table schema first.
@@ -164,7 +164,7 @@ async def query_data(sql_query: str) -> str:
         logger.error(f"Error in query_data: {e}")
         return f"Error executing query: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(description="Calculate statistical metrics (mean, median, p95) for a numeric column from a SQL query.")
 async def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = None) -> str:
     """
     Fetch data via SQL and perform statistical analysis on a specific metric.
@@ -198,7 +198,7 @@ async def analyze_metrics(sql_query: str, metric_column: str, groupby_column: st
         logger.error(f"Error in analyze_metrics: {e}")
         return f"Error analyzing metrics: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(description="Detect structural changes (changepoints) in a time-series column using the VWCD algorithm.")
 async def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> str:
     """
     Execute a SQL query and detect change points on a specific metric column using the VWCD algorithm.
@@ -251,7 +251,7 @@ async def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> 
         logger.error(f"Error in analyze_change_points_from_sql: {e}")
         return f"Error analyzing change points from SQL: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(description="Get reference documentation for M-Lab network metrics (NDT, Traceroute).")
 def get_mlab_documentation(topic: str = None) -> str:
     """
     Get documentation about M-Lab tools (NDT, Traceroute).
