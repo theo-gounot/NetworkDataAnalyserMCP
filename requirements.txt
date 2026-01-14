@@ -1,8 +1,9 @@
 mcp
 pandas
-psycopg2-binary
+asyncpg
 python-dotenv
 numpy
 scipy
 pytest
 pytest-mock
+pytest-asyncio

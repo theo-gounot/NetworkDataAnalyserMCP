@@ -3,9 +3,8 @@ import json
 import logging
 import pandas as pd
 import numpy as np
-import psycopg2
-from psycopg2 import pool
-from contextlib import contextmanager
+import asyncpg
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 import vwcd
@@ -28,29 +27,26 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", 8000))
 
-# Initialize FastMCP
-mcp = FastMCP(name="Data-Analyzer-MCP", host=MCP_HOST, port=MCP_PORT)
-
 # --- Global State ---
 _db_pool = None
 _cached_docs = {}
 
-# --- Initialization ---
-def init_resources():
-    """Initialize database pool and cache documentation."""
+@asynccontextmanager
+async def lifespan(context):
+    """Initialize database pool and cache documentation on startup."""
     global _db_pool, _cached_docs
     
     # Init DB Pool
     try:
         if not _db_pool:
-            _db_pool = psycopg2.pool.SimpleConnectionPool(
-                minconn=1,
-                maxconn=20,
+            _db_pool = await asyncpg.create_pool(
                 host=DB_HOST,
                 port=DB_PORT,
                 database=DB_NAME,
                 user=DB_USER,
-                password=DB_PASSWORD
+                password=DB_PASSWORD,
+                min_size=1,
+                max_size=20
             )
             logger.info("Database connection pool initialized.")
     except Exception as e:
@@ -67,79 +63,88 @@ def init_resources():
                 logger.warning("documentation.json not found.")
     except Exception as e:
         logger.error(f"Failed to load documentation: {e}")
+        
+    yield
+    
+    # Cleanup
+    if _db_pool:
+        await _db_pool.close()
+        logger.info("Database connection pool closed.")
 
-# Call init immediately to fail fast if config is bad, 
-# or we can rely on lazy loading in tools. 
-# For an MCP server, lazy loading + module level init is a common pattern.
-init_resources()
+# Initialize FastMCP with lifespan
+mcp = FastMCP(name="Data-Analyzer-MCP", host=MCP_HOST, port=MCP_PORT, lifespan=lifespan)
 
 # --- Database Helper ---
-@contextmanager
-def get_db_connection():
+@asynccontextmanager
+async def get_db_connection():
     """Yields a connection from the pool and ensures it's returned."""
     if _db_pool is None:
-        init_resources()
-        if _db_pool is None:
-            raise Exception("Database pool is not initialized.")
+        raise Exception("Database pool is not initialized.")
     
-    conn = _db_pool.getconn()
-    try:
+    async with _db_pool.acquire() as conn:
         yield conn
-    finally:
-        _db_pool.putconn(conn)
+
+async def fetch_as_dataframe(query: str, *args) -> pd.DataFrame:
+    """Helper to fetch data using asyncpg and convert to DataFrame."""
+    async with get_db_connection() as conn:
+        records = await conn.fetch(query, *args)
+        if not records:
+            return pd.DataFrame()
+        return pd.DataFrame([dict(r) for r in records])
 
 # --- Tools ---
 
 @mcp.tool()
-def list_tables() -> str:
+async def list_tables() -> str:
     """Start here. Discover the available database tables (public schema) to understand what network telemetry data is accessible."""
     logger.info("Tool called: list_tables")
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'public'
-                """)
-                tables = [row[0] for row in cur.fetchall()]
+        query = """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+        """
+        async with get_db_connection() as conn:
+            records = await conn.fetch(query)
+            tables = [r['table_name'] for r in records]
         return json.dumps({"tables": tables})
     except Exception as e:
         logger.error(f"Error in list_tables: {e}")
         return f"Error listing tables: {str(e)}"
 
 @mcp.tool()
-def describe_table(table_name: str) -> str:
+async def describe_table(table_name: str) -> str:
     """Inspect the schema of a specific table. Returns column names and sample rows. **ALWAYS** run this before writing a custom SQL query to ensure your column names are correct."""
     logger.info(f"Tool called: describe_table (table={table_name})")
     try:
-        with get_db_connection() as conn:
-            # Get column info
-            query_cols = """
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
-                WHERE table_name = %s
-            """
-            df_cols = pd.read_sql(query_cols, conn, params=(table_name,))
-            
-            # Get sample rows
-            # Validate table_name to prevent injection (simple alphanumeric check recommended)
-            if not table_name.replace("_","").isalnum():
-                 return "Error: Invalid table name."
+        # Validate table_name to prevent injection (simple alphanumeric check recommended)
+        if not table_name.replace("_","").isalnum():
+             return "Error: Invalid table name."
 
-            query_sample = f"SELECT * FROM {table_name} LIMIT 3"
-            df_sample = pd.read_sql(query_sample, conn)
+        # Get column info
+        query_cols = """
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name = $1
+        """
+        df_cols = await fetch_as_dataframe(query_cols, table_name)
+        
+        # Get sample rows
+        # Note: asyncpg cannot parameterize table names directly in the FROM clause safely without strict validation or dynamic SQL construction.
+        # Since we validated table_name above, f-string is relatively safe here, but still be cautious.
+        query_sample = f"SELECT * FROM {table_name} LIMIT 3"
+        df_sample = await fetch_as_dataframe(query_sample)
         
         return json.dumps({
-            "columns": df_cols.to_dict(orient="records"),
-            "sample_data": df_sample.to_dict(orient="records")
+            "columns": df_cols.to_dict(orient="records") if not df_cols.empty else [],
+            "sample_data": df_sample.to_dict(orient="records") if not df_sample.empty else []
         }, default=str)
     except Exception as e:
         logger.error(f"Error in describe_table: {e}")
         return f"Error describing table {table_name}: {str(e)}"
 
 @mcp.tool()
-def query_data(sql_query: str) -> str:
+async def query_data(sql_query: str) -> str:
     """
     Execute custom read-only SQL (SELECT/WITH) for complex aggregations or filtering not covered by other tools. **Warning:** Ensure you know the table schema first.
     """
@@ -153,23 +158,21 @@ def query_data(sql_query: str) -> str:
         return "Error: Only SELECT, WITH, and EXPLAIN queries are allowed."
     
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql(sql_query, conn)
+        df = await fetch_as_dataframe(sql_query)
         return df.to_json(orient="records", date_format="iso")
     except Exception as e:
         logger.error(f"Error in query_data: {e}")
         return f"Error executing query: {str(e)}"
 
 @mcp.tool()
-def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = None) -> str:
+async def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = None) -> str:
     """
     Fetch data via SQL and perform statistical analysis on a specific metric.
     Returns mean, median, std dev, and percentiles (p5, p95).
     """
     logger.info(f"Tool called: analyze_metrics (metric={metric_column})")
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql(sql_query, conn)
+        df = await fetch_as_dataframe(sql_query)
         
         if df.empty:
             return "No data found."
@@ -196,36 +199,7 @@ def analyze_metrics(sql_query: str, metric_column: str, groupby_column: str = No
         return f"Error analyzing metrics: {str(e)}"
 
 @mcp.tool()
-def detect_change_points(data: list[float]) -> str:
-    """
-    Identify structural changes in connection quality. Accepts an array of time-series data (e.g., download speeds) and finds the exact indices where performance shifted significantly.
-    """
-    logger.info(f"Tool called: detect_change_points (data_points={len(data) if data else 0})")
-    try:
-        if not data:
-            return "Error: Empty data provided."
-        
-        # Convert to numpy array
-        X = np.array(data)
-        
-        # Run VWCD
-        CP, _, _, elapsed = vwcd.vwcd(X)
-        
-        # Get segments with statistical description
-        segments = vwcd.get_segments(X, CP)
-            
-        return json.dumps({
-            "change_points": [int(cp) for cp in CP],
-            "segments": segments,
-            "elapsed_time_ms": elapsed * 1000
-        })
-
-    except Exception as e:
-        logger.error(f"Error in detect_change_points: {e}")
-        return f"Error detecting change points: {str(e)}"
-
-@mcp.tool()
-def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> str:
+async def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> str:
     """
     Execute a SQL query and detect change points on a specific metric column using the VWCD algorithm.
     This avoids fetching large datasets to the client.
@@ -239,8 +213,7 @@ def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> str:
         return "Error: Only SELECT, WITH, and EXPLAIN queries are allowed."
 
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql(sql_query, conn)
+        df = await fetch_as_dataframe(sql_query)
         
         if df.empty:
             return "No data found."
@@ -258,7 +231,12 @@ def analyze_change_points_from_sql(sql_query: str, metric_column: str) -> str:
         X = np.array(data)
         
         # Run VWCD
-        CP, _, _, elapsed = vwcd.vwcd(X)
+        # Note: VWCD is CPU bound and synchronous. In a high-load async server, 
+        # this should be run in a separate thread/process to avoid blocking the event loop.
+        # However, for simplicity here we call it directly, or we could use loop.run_in_executor
+        import asyncio
+        loop = asyncio.get_running_loop()
+        CP, _, _, elapsed = await loop.run_in_executor(None, vwcd.vwcd, X)
         
         # Get segments with statistical description
         segments = vwcd.get_segments(X, CP)
