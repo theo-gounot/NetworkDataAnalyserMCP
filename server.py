@@ -26,6 +26,7 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", 8000))
+DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", 300))
 
 # --- Global State ---
 _db_pool = None
@@ -46,7 +47,8 @@ async def lifespan(context):
                 user=DB_USER,
                 password=DB_PASSWORD,
                 min_size=1,
-                max_size=20
+                max_size=20,
+                command_timeout=DB_TIMEOUT
             )
             logger.info("Database connection pool initialized.")
     except Exception as e:
@@ -69,6 +71,7 @@ async def lifespan(context):
     # Cleanup
     if _db_pool:
         await _db_pool.close()
+        _db_pool = None
         logger.info("Database connection pool closed.")
 
 # Initialize FastMCP with lifespan
@@ -91,6 +94,29 @@ async def fetch_as_dataframe(query: str, *args) -> pd.DataFrame:
         if not records:
             return pd.DataFrame()
         return pd.DataFrame([dict(r) for r in records])
+
+def to_toon(df: pd.DataFrame) -> str:
+    """Converts a DataFrame to Token Oriented Object Notation (TOON) - a compact pipe-separated format."""
+    if df.empty:
+        return ""
+    
+    # Header: Column names
+    header = " | ".join(df.columns)
+    
+    # Rows: Values
+    # We use a custom format to keep it compact: 
+    # - ISO format for dates
+    # - Minimal precision for floats to save tokens
+    def format_val(v):
+        if pd.isna(v): return ""
+        if isinstance(v, (float, np.floating)): return f"{v:.4g}"
+        return str(v)
+
+    rows = []
+    for _, row in df.iterrows():
+        rows.append(" | ".join(row.map(format_val)))
+    
+    return f"{header}\n" + "\n".join(rows)
 
 # --- Tools ---
 
@@ -130,14 +156,12 @@ async def describe_network_table(table_name: str) -> str:
         df_cols = await fetch_as_dataframe(query_cols, table_name)
         
         # Get sample rows
-        # Note: asyncpg cannot parameterize table names directly in the FROM clause safely without strict validation or dynamic SQL construction.
-        # Since we validated table_name above, f-string is relatively safe here, but still be cautious.
         query_sample = f"SELECT * FROM {table_name} LIMIT 3"
         df_sample = await fetch_as_dataframe(query_sample)
         
         return json.dumps({
             "columns": df_cols.to_dict(orient="records") if not df_cols.empty else [],
-            "sample_data": df_sample.to_dict(orient="records") if not df_sample.empty else []
+            "sample_data_toon": to_toon(df_sample)
         }, default=str)
     except Exception as e:
         logger.error(f"Error in describe_table: {e}")
@@ -146,7 +170,8 @@ async def describe_network_table(table_name: str) -> str:
 @mcp.tool(description="Execute a read-only SQL query (SELECT/WITH) to retrieve data. Use this for custom filtering and joins.")
 async def query_data(sql_query: str) -> str:
     """
-    Execute custom read-only SQL (SELECT/WITH) for complex aggregations or filtering not covered by other tools. **Warning:** Ensure you know the table schema first.
+    Execute custom read-only SQL (SELECT/WITH) for complex aggregations or filtering not covered by other tools. 
+    Returns data in TOON format (Pipe-separated) for token efficiency.
     """
     logger.info(f"Tool called: query_data")
     
@@ -159,7 +184,9 @@ async def query_data(sql_query: str) -> str:
     
     try:
         df = await fetch_as_dataframe(sql_query)
-        return df.to_json(orient="records", date_format="iso")
+        if df.empty:
+            return "No data found."
+        return to_toon(df)
     except Exception as e:
         logger.error(f"Error in query_data: {e}")
         return f"Error executing query: {str(e)}"

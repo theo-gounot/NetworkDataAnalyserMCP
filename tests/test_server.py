@@ -9,6 +9,8 @@ import asyncio
 @pytest.fixture
 def mock_db_pool():
     with patch('server._db_pool', new_callable=AsyncMock) as mock_pool:
+        # asyncpg Pool.acquire is not a coroutine, it returns an async context manager
+        mock_pool.acquire = MagicMock()
         mock_conn = AsyncMock()
         mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
         mock_pool.acquire.return_value.__aexit__.return_value = None
@@ -24,12 +26,30 @@ async def test_list_tables(mock_db_pool):
     mock_conn.fetch.return_value = [{'table_name': 'table1'}, {'table_name': 'table2'}]
     
     # Run the tool
-    result = await server.list_tables()
+    result = await server.list_network_tables()
     data = json.loads(result)
     
     assert "tables" in data
     assert data["tables"] == ['table1', 'table2']
     mock_pool.acquire.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_describe_network_table():
+    with patch('server.fetch_as_dataframe', new_callable=AsyncMock) as mock_fetch:
+        # Mock returns for columns and sample data
+        cols_df = pd.DataFrame({'column_name': ['id', 'val'], 'data_type': ['int', 'text']})
+        sample_df = pd.DataFrame({'id': [1], 'val': ['x']})
+        
+        # side_effect allows different returns for sequential calls
+        mock_fetch.side_effect = [cols_df, sample_df]
+        
+        result = await server.describe_network_table("valid_table")
+        data = json.loads(result)
+        
+        assert "columns" in data
+        assert "sample_data_toon" in data
+        assert "id | val" in data["sample_data_toon"]
+        assert "1 | x" in data["sample_data_toon"]
 
 @pytest.mark.asyncio
 async def test_query_data_validation():
@@ -55,10 +75,13 @@ async def test_query_data_execution():
         mock_fetch.return_value = df
         
         result = await server.query_data("SELECT * FROM table")
-        data = json.loads(result)
         
-        assert len(data) == 2
-        assert data[0]['col1'] == 1
+        # Verify TOON format
+        lines = result.strip().split('\n')
+        assert len(lines) == 3
+        assert lines[0] == "col1 | col2"
+        assert "1 | a" in lines[1]
+        assert "2 | b" in lines[2]
         mock_fetch.assert_called_once()
 
 def test_get_mlab_documentation():
@@ -127,5 +150,5 @@ async def test_analyze_change_points_from_sql():
     
     # Test missing column
     with patch('server.fetch_as_dataframe', new_callable=AsyncMock) as mock_fetch:
-        mock_fetch.return_value = pd.DataFrame({'metric': []})
+        mock_fetch.return_value = pd.DataFrame({'metric': [10]})
         assert "Metric column" in await server.analyze_change_points_from_sql("SELECT * FROM t", "wrong_col")
