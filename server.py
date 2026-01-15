@@ -95,7 +95,7 @@ async def fetch_as_dataframe(query: str, *args) -> pd.DataFrame:
 # --- Tools ---
 
 @mcp.tool(description="List all available tables in the public schema of the database.")
-async def list_tables() -> str:
+async def list_network_tables() -> str:
     """Start here. Discover the available database tables (public schema) to understand what network telemetry data is accessible."""
     logger.info("Tool called: list_tables")
     try:
@@ -113,7 +113,7 @@ async def list_tables() -> str:
         return f"Error listing tables: {str(e)}"
 
 @mcp.tool(description="Get the column names, types, and a few sample rows for a specific table.")
-async def describe_table(table_name: str) -> str:
+async def describe_network_table(table_name: str) -> str:
     """Inspect the schema of a specific table. Returns column names and sample rows. **ALWAYS** run this before writing a custom SQL query to ensure your column names are correct."""
     logger.info(f"Tool called: describe_table (table={table_name})")
     try:
